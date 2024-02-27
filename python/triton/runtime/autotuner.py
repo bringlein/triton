@@ -153,7 +153,7 @@ class Autotuner(KernelInterface):
         self.best_config = config
         if self.report:
             autotune_stop = time.time()
-            print(f"Autotuner finished after {autotune_stop-autotune_start:.2f}s; best config selected: {self.best_config};")
+            print(f"Autotuner for function {self.fn} finished after {autotune_stop-autotune_start:.2f}s; best config selected: {self.best_config};")
         full_nargs = {**self.nargs, **kwargs, **self.best_config.kwargs}
         if config.pre_hook is not None:
             config.pre_hook(full_nargs)
