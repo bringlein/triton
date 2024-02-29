@@ -126,6 +126,7 @@ class Autotuner(KernelInterface):
     def run(self, *args, **kwargs):
         self.nargs = dict(zip(self.arg_names, args))
         autotune_start = time.time()
+        used_cached_result = True
         if len(self.configs) > 1:
             all_args = {**self.nargs, **kwargs}
             _args = []
@@ -139,6 +140,7 @@ class Autotuner(KernelInterface):
             key = tuple(key)
             if key not in self.cache:
                 # prune configs
+                used_cached_result = False
                 pruned_configs = self.prune_configs(kwargs)
                 bench_start = time.time()
                 timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
@@ -151,7 +153,7 @@ class Autotuner(KernelInterface):
         else:
             config = self.configs[0]
         self.best_config = config
-        if self.report:
+        if self.report and not used_cached_result:
             autotune_stop = time.time()
             print(f"Autotuner for function {self.fn} finished after {autotune_stop-autotune_start:.2f}s; best config selected: {self.best_config};")
         full_nargs = {**self.nargs, **kwargs, **self.best_config.kwargs}
