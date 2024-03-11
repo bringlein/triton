@@ -128,6 +128,9 @@ class Builder:
 
     def get_int64_ty(self):
         return tl.int64
+    
+    def get_int32_ty(self):
+        return tl.int32
 
     def get_ptr_ty(self, elt_ty, addr_space):
         return tl.pointer_type(elt_ty, addr_space)

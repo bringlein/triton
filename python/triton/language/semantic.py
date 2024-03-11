@@ -651,7 +651,7 @@ def cast(input: tl.tensor, dst_ty: tl.dtype, builder: ir.builder) -> tl.tensor:
     src_sca_ty = src_ty.scalar
     dst_sca_ty = dst_ty.scalar
 
-    if _is_cuda(builder.target) and builder.target.capability < 89 and \
+    if hasattr(builder, 'target') and _is_cuda(builder.target) and builder.target.capability < 89 and \
        (src_sca_ty.is_fp8e4nv() or dst_sca_ty.is_fp8e4nv()):
         assert False, "fp8e4nv data type is not supported on CUDA arch < 89"
 
