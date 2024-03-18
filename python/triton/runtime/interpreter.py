@@ -402,7 +402,10 @@ def _patch_lang_core(lang, builder):
             "_sum_combine": np.sum,
         }
         ret = mapping[fn](input.handle.data, axis=axis)
-        ret_type = tl.block_type(input.dtype, ret.shape)
+        shape=ret.shape
+        if not shape:
+            shape = (1,)   # just a number
+        ret_type = tl.block_type(input.dtype, shape)
         return tl.core.tensor(TensorHandle(ret, input.dtype), ret_type)
 
     lang.reduce = _new_reduce
@@ -417,6 +420,12 @@ def _patch_lang_math(lang, builder):
         "exp2": "exp2",
         "log2": "log2",
         "max": "maximum",
+        "pow": "power",
+        "sqrt": "sqrt",
+        "rsqrt": "sqrt",  # reziproke is done in post processing
+    }
+    postprocessing = {
+        "rsqrt": "reciprocal",
     }
 
     def make_numpy(name):
@@ -424,9 +433,11 @@ def _patch_lang_math(lang, builder):
         def impl(*args, **kwargs):
             ret_type = args[0].type  # TODO: incorrect
             ret_dtype = args[0].dtype  # TODO: incorrect
-            args = [arg.handle.data for arg in args]
+            args = [arg.handle.data if hasattr(arg, 'handle') else arg for arg in args]
             kwargs = {k: v.handle.data for k, v in kwargs.items()}
             ret = getattr(np, mapping[name])(*args, **kwargs)
+            if name in postprocessing:
+                ret = getattr(np, postprocessing[name])(ret)  # TODO: if args/kwargs are needed?
             ret = tl.core.tensor(TensorHandle(ret, ret_dtype), ret_type)
             return ret
 
