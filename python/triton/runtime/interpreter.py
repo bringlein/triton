@@ -151,6 +151,9 @@ class Builder:
 
     def get_int64_ty(self):
         return tl.int64
+    
+    def get_int32_ty(self):
+        return tl.int32
 
     def get_uint64_ty(self):
         return tl.uint64
@@ -179,6 +182,9 @@ class Builder:
     def get_uint32(self, value):
         return TensorHandle(np.array([value], dtype=np.uint32), tl.uint32)
 
+    def get_int1(self, value):
+        return TensorHandle(np.array([value], dtype=np.bool_), tl.int1)
+    
     def get_int32(self, value):
         return TensorHandle(np.array([value], dtype=np.int32), tl.int32)
 
@@ -644,8 +650,13 @@ def _patch_lang_math(lang):
         "max": np.maximum,
         "floor": np.floor,
         "div_rn": np.divide,
+        "pow": np.power,
         "sqrt_rn": np.sqrt,
         "sqrt": np.sqrt,
+        "rsqrt": np.sqrt,  # reziproke is done in post processing
+    }
+    postprocessing = {
+        "rsqrt": np.reciprocal,
     }
 
     def make_numpy(name):
@@ -653,10 +664,13 @@ def _patch_lang_math(lang):
         def impl(*args, **kwargs):
             ret_type = args[0].type  # TODO: incorrect
             ret_dtype = args[0].handle.dtype  # TODO: incorrect
+            # TODO  args = [arg.handle.data if hasattr(arg, 'handle') else arg for arg in args]
             args = [arg.handle.data for arg in args if isinstance(arg, tl.core.tensor)]
             # remove the _builder kwarg
             kwargs = {k: v.handle.data for k, v in kwargs.items() if k != "_builder"}
             ret = mapping[name](*args, **kwargs)
+            if name in postprocessing:
+                ret = postprocessing[name](ret)  # TODO: if args/kwargs are needed?
             ret = tl.core.tensor(TensorHandle(ret, ret_dtype), ret_type)
             return ret
 
