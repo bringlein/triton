@@ -108,6 +108,7 @@ class Builder:
             tl.float16: np.dtype(np.float16),
             tl.float32: np.dtype(np.float32),
             tl.float64: np.dtype(np.float64),
+            tl.int1: np.dtype(bool),
             tl.int8: np.dtype(np.int8),
             tl.uint8: np.dtype(np.uint8),
             tl.int16: np.dtype(np.int16),
@@ -138,6 +139,9 @@ class Builder:
     def get_block_ty(self, dtype, shape):
         return tl.tensor(shape, dtype)
 
+    def get_int1(self, value):
+        return TensorHandle(np.array([value], dtype=np.bool_), tl.int1)
+    
     def get_int32(self, value):
         return TensorHandle(np.array([value], dtype=np.int32), tl.int32)
 
