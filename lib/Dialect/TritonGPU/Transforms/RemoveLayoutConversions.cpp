@@ -151,6 +151,7 @@ bool hasConvertToMMATransisitiveUse(Operation *op, Attribute encoding) {
   SmallVector<Value> queue = {op->getResult(0)};
   SetVector<Operation *> forwardSlice;
   llvm::SmallDenseSet<Value> seen;
+  bool isMMAV3 = encoding.cast<NvidiaMmaEncodingAttr>().getVersionMajor() == 3;
   while (!queue.empty()) {
     Value currentValue = queue.back();
     queue.pop_back();
@@ -164,6 +165,8 @@ bool hasConvertToMMATransisitiveUse(Operation *op, Attribute encoding) {
         if (dstEncoding.isa<DotOperandEncodingAttr>())
           return encoding.cast<NvidiaMmaEncodingAttr>().getVersionMajor() > 1;
       }
+      if (isMMAV3 && isa<LocalAllocOp>(op))
+        return true;
       auto yield = dyn_cast<scf::YieldOp>(op);
       if (!yield)
         continue;
@@ -186,7 +189,7 @@ bool hasConvertToMMATransisitiveUse(Operation *op, Attribute encoding) {
 bool isLayoutAnchor(Operation *op) {
   if (isa<LoadOp, StoreOp>(op))
     return isExpensiveLoadOrStore(op);
-  if (isa<DotOp, AtomicRMWOp, AtomicCASOp>(op))
+  if (isa<DotOp, nvidia_gpu::DotAsyncOp, AtomicRMWOp, AtomicCASOp>(op))
     return true;
 
   // Heuristic: Mark permuting reshape as a layout anchor.  Its dst can be
@@ -302,8 +305,8 @@ SmallVector<Value> LayoutPropagation::propagateToUsers(Value value,
     }
     if (user->hasTrait<OpTrait::SameOperandsAndResultEncoding>() ||
         user->hasTrait<OpTrait::Elementwise>() ||
-        isa<ReduceOp, ExpandDimsOp, ReshapeOp, JoinOp, SplitOp,
-            ConvertLayoutOp>(user)) {
+        isa<ReduceOp, ExpandDimsOp, ReshapeOp, TransOp, JoinOp, SplitOp,
+            ConvertLayoutOp, nvidia_gpu::DotWaitOp>(user)) {
       setEncoding(user->getResults(), info, changed, user);
       continue;
     }
@@ -721,12 +724,17 @@ Operation *LayoutPropagation::rewriteOp(Operation *op) {
   }
   if (op->hasTrait<OpTrait::SameOperandsAndResultEncoding>() ||
       op->hasTrait<OpTrait::Elementwise>() ||
-      isa<ReduceOp, ExpandDimsOp, ReshapeOp, JoinOp, SplitOp, ConvertLayoutOp>(
-          op)) {
+      isa<ReduceOp, ExpandDimsOp, ReshapeOp, TransOp, JoinOp, SplitOp,
+          ConvertLayoutOp, nvidia_gpu::DotWaitOp>(op)) {
     Operation *newOp = cloneElementwise(rewriter, op, encoding);
     for (auto [oldResult, newResult] :
-         llvm::zip(op->getResults(), newOp->getResults()))
+         llvm::zip(op->getResults(), newOp->getResults())) {
+      if (oldResult.getType() == newResult.getType()) {
+        oldResult.replaceAllUsesWith(newResult);
+        continue;
+      }
       map(oldResult, newResult);
+    }
     return newOp;
   }
   llvm::report_fatal_error("unexpected op in rewrite");
@@ -736,8 +744,7 @@ Operation *LayoutPropagation::rewriteOp(Operation *op) {
 bool canBeRemat(Operation *op) {
   if (isa<LoadOp, StoreOp>(op))
     return !isExpensiveLoadOrStore(op);
-  if (isa<tensor::ExtractSliceOp, AllocTensorOp, InsertSliceAsyncOp,
-          AtomicRMWOp, AtomicCASOp, DotOp>(op))
+  if (isa<AtomicRMWOp, AtomicCASOp, DotOp>(op))
     return false;
   if (isa<scf::WhileOp, scf::ConditionOp>(op))
     return false;
@@ -894,10 +901,6 @@ LogicalResult getRematerializableSlice(
 }
 
 void backwardRematerialization(ConvertLayoutOp convertOp) {
-  // we don't want to rematerialize any conversion to/from shared
-  if (hasSharedEncoding(convertOp.getResult()) ||
-      hasSharedEncoding(convertOp.getSrc()))
-    return;
   // we don't handle conversions to DotOperandEncodingAttr
   // this is a heuristic to accommodate fused attention
   RankedTensorType targetType = convertOp.getType();
@@ -920,10 +923,6 @@ void backwardRematerialization(ConvertLayoutOp convertOp) {
 // For convert left we try to hoist them above type extension to reduce the cost
 // of the convert.
 void hoistConvertOnTopOfExtOrBroadcast(ConvertLayoutOp convertOp) {
-  // we don't want to rematerialize any conversion to/from shared
-  if (hasSharedEncoding(convertOp.getResult()) ||
-      hasSharedEncoding(convertOp.getSrc()))
-    return;
   // we don't handle conversions to DotOperandEncodingAttr
   // this is a heuristics to accommodate fused attention
   RankedTensorType targetType = convertOp.getType();

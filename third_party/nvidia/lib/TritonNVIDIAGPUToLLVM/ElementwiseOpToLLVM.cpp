@@ -1,8 +1,9 @@
-#include "nvidia/include/TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
+#include "TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
 
 #include "PatternTritonGPUOpToLLVM.h"
 #include "Utility.h"
 
+#include "TargetInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVMBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 
@@ -551,10 +552,10 @@ struct FpToFpOpConversion
       llvm::errs() << "\n";
       llvm::report_fatal_error("Unsupported rounding mode for conversion.");
     }
-    if (computeCapability < 90 &&
+    if (computeCapability < 89 &&
         (srcTy.isFloat8E4M3FNUZ() || dstTy.isFloat8E4M3FNUZ())) {
       llvm::errs() << "Conversion from/to f8e4m3nv is only supported on "
-                      "compute capability >= 90"
+                      "compute capability >= 89"
                    << "\n";
       llvm_unreachable("");
     }
@@ -760,6 +761,30 @@ struct FSubOpConversion
     } else {
       return {rewriter.create<LLVM::FSubOp>(loc, elemTy, operands[0][0],
                                             operands[0][1])};
+    }
+  }
+};
+
+struct FNegOpConversion
+    : ElementwiseOpConversionBase<arith::NegFOp, FNegOpConversion> {
+  using Base = ElementwiseOpConversionBase<arith::NegFOp, FNegOpConversion>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  SmallVector<Value> createDestOps(arith::NegFOp op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    auto operandTy = getElementType(op.getOperand());
+    if (operandTy.isBF16()) {
+      PTXBuilder builder;
+      auto &neg = builder.create<PTXInstr>("neg")->o("bf16");
+      auto res = builder.newOperand("=h");
+      auto val = builder.newOperand(operands[0][0], "h");
+      neg(res, val);
+      return {builder.launch(rewriter, loc, i16_ty, false)};
+    } else {
+      return {rewriter.create<LLVM::FNegOp>(loc, elemTy, operands[0][0])};
     }
   }
 };
@@ -1057,7 +1082,7 @@ private:
 void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, int computeCapability,
-    PatternBenefit benefit) {
+    const TargetInfo &targetInfo, PatternBenefit benefit) {
   using namespace mlir::triton::gpu;
 
 #define POPULATE_BINARY_OP(SRC_OP, DST_OP)                                     \
@@ -1126,6 +1151,7 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
   patterns.add<FSubOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<FAddOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<FMulOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<FNegOpConversion>(typeConverter, axisInfoAnalysis, benefit);
 
   patterns.add<ExtFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<TruncFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
@@ -1146,8 +1172,7 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
       typeConverter, patterns, axisInfoAnalysis, hwNanPropagationSupported,
       benefit);
   mlir::triton::populateClampFOpToLLVMPattern(
-      typeConverter, patterns, axisInfoAnalysis, hwNanPropagationSupported,
-      benefit);
+      typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
 }
 
 void mlir::triton::NVIDIA::populateClampFOpToLLVMPattern(

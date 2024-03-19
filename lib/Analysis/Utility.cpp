@@ -410,11 +410,6 @@ bool maybeSharedAllocationOp(Operation *op) {
           dialect->getTypeID() == TypeID::get<tensor::TensorDialect>());
 }
 
-bool maybeAliasOp(Operation *op) {
-  return isa<ExtractSliceOp, triton::TransOp, InsertSliceAsyncOp,
-             tensor::InsertSliceOp>(op);
-}
-
 static bool supportMFMAGranularity(int m, int n, int k) {
   // these limitations are dtype dependent, in future we may relax them
   const static std::pair<int, int> mfmaTypes[2] = {{32, 8}, {16, 16}};
@@ -477,12 +472,60 @@ bool supportMFMA(triton::DotOp op) {
   return true;
 }
 
+static bool supportWMMAGranularity(int m, int n, int k) {
+  return m % 16 == 0 && n % 16 == 0 && k % 16 == 0;
+}
+
+static bool supportWMMATypes(Type a, Type b, Type c, Type d) {
+  if (a != b || c != d)
+    return false;
+  if (a.isIntOrIndex()) {
+    if (!c.isIntOrIndex())
+      return false;
+    auto aWidth = a.getIntOrFloatBitWidth();
+    auto cWidth = c.getIntOrFloatBitWidth();
+    bool aValid = a.isUnsignedInteger() && (aWidth == 4 || aWidth == 8);
+    bool cValid = c.isSignedInteger() && cWidth == 32;
+    return aValid && cValid;
+  } else if (a.isa<FloatType>()) {
+    if (a.isBF16())
+      return c.isBF16() || c.isF32();
+    if (a.isF16())
+      return c.isF16() || c.isF32();
+  }
+  return false;
+}
+
+bool supportWMMA(triton::DotOp op) {
+  auto aTy = op.getA().getType().cast<RankedTensorType>();
+  auto bTy = op.getB().getType().cast<RankedTensorType>();
+  auto cTy = op.getC().getType().cast<RankedTensorType>();
+  auto dTy = op.getResult().getType().cast<RankedTensorType>();
+
+  auto aElemTy = aTy.getElementType();
+  auto bElemTy = bTy.getElementType();
+  auto cElemTy = cTy.getElementType();
+  auto dElemTy = dTy.getElementType();
+
+  if (!supportWMMATypes(aElemTy, bElemTy, cElemTy, dElemTy))
+    return false;
+
+  auto aShape = aTy.getShape();
+  auto bShape = bTy.getShape();
+
+  assert(aShape[1] == bShape[0]);
+  if (!supportWMMAGranularity(aShape[0], bShape[1], aShape[1]))
+    return false;
+
+  return true;
+}
+
 bool supportMMA(triton::DotOp op, int version) {
   // Refer to mma section for the data type supported by Volta and Hopper
   // Tensor Core in
   // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-fragment-mma-884-f16
-  auto aElemTy = op.getA().getType().cast<RankedTensorType>().getElementType();
-  auto bElemTy = op.getB().getType().cast<RankedTensorType>().getElementType();
+  auto aElemTy = op.getA().getType().getElementType();
+  auto bElemTy = op.getB().getType().getElementType();
   if (version == 3) {
     if (triton::tools::getBoolEnv("DISABLE_MMA_V3"))
       return false;
@@ -517,7 +560,7 @@ bool supportMMA(Value value, int version) {
   // types of both the operands are identical here.
   assert((version == 1 || version == 2 || version == 3) &&
          "Unexpected MMA layout version found");
-  auto elemTy = value.getType().cast<RankedTensorType>().getElementType();
+  auto elemTy = value.getType().cast<TensorOrMemDesc>().getElementType();
   // FP8 is not natively supported on all mma versions but it can always be
   // promoted to fp16 therefore we can always support it.
   bool isFP8 = elemTy.isFloat8E5M2() || elemTy.isFloat8E4M3FN() ||
@@ -531,7 +574,7 @@ bool supportMMA(Value value, int version) {
 bool isMfmaToDotShortcut(RankedTensorType &srcTy, RankedTensorType &dstTy) {
   auto srcLayout = srcTy.getEncoding();
   auto dstLayout = dstTy.getEncoding();
-  auto mfmaLayout = srcLayout.cast<MfmaEncodingAttr>();
+  auto mfmaLayout = srcLayout.cast<AMDMfmaEncodingAttr>();
   auto dotOperandLayout = dstLayout.cast<DotOperandEncodingAttr>();
   // TODO: Remove the restriction on the warpsPerCTA once chain dot testing is
   // improved. In addition, we can enable this shortcut for regular MFMA
@@ -540,7 +583,8 @@ bool isMfmaToDotShortcut(RankedTensorType &srcTy, RankedTensorType &dstTy) {
          dotOperandLayout.getOpIdx() == 0 &&
          dotOperandLayout.getKWidth() == 4 &&
          dotOperandLayout.getParent() == mfmaLayout &&
-         mfmaLayout.getNonKDim() == 32 && mfmaLayout.getIsTransposed() &&
+         (mfmaLayout.getMDim() == 32 || mfmaLayout.getMDim() == 16) &&
+         mfmaLayout.getIsTransposed() &&
          (srcTy.getElementType().isF16() || srcTy.getElementType().isBF16());
 }
 
@@ -566,10 +610,11 @@ bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,
   auto dstLayout = dstTy.getEncoding();
   auto mmaLayout = srcLayout.cast<NvidiaMmaEncodingAttr>();
   auto dotOperandLayout = dstLayout.cast<DotOperandEncodingAttr>();
-  auto ans =
-      mmaLayout.getVersionMajor() == 3 && dotOperandLayout.getOpIdx() == 0 &&
-      isMmaToMmaShortcut(dotOperandLayout.getParent(), srcLayout) &&
-      (srcTy.getElementType().isF16() || srcTy.getElementType().isBF16());
+  int elementTypeSize = srcTy.getElementType().getIntOrFloatBitWidth();
+  auto ans = mmaLayout.getVersionMajor() == 3 &&
+             dotOperandLayout.getOpIdx() == 0 &&
+             isMmaToMmaShortcut(dotOperandLayout.getParent(), srcLayout) &&
+             (elementTypeSize == 16 || elementTypeSize == 8);
   return ans;
 }
 

@@ -165,9 +165,9 @@ getReshapeDecomposition(ArrayRef<int64_t> srcShape, ArrayRef<int64_t> dstShape);
 
 bool maybeSharedAllocationOp(Operation *op);
 
-bool maybeAliasOp(Operation *op);
-
 bool supportMFMA(triton::DotOp op);
+
+bool supportWMMA(triton::DotOp op);
 
 bool supportMMA(triton::DotOp op, int version);
 

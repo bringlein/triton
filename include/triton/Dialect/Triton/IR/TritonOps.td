@@ -17,6 +17,8 @@ include "mlir/Interfaces/InferTypeOpInterface.td" // SameOperandsAndResultType
 include "mlir/Interfaces/SideEffectInterfaces.td" // Pure
 include "mlir/Interfaces/CastInterfaces.td" // CastOpInterface
 include "mlir/Interfaces/CallInterfaces.td" // CallOpInterface
+include "triton/Dialect/Triton/IR/TritonTypeInterfaces.td"
+
 
 //
 // Interfaces
@@ -511,11 +513,11 @@ def TT_TransOp : TT_Op<"trans", [Pure,
     }];
 
     let arguments = (
-      ins TT_Tensor:$src,
+      ins TT_TensorOrMemDesc:$src,
       DenseI32ArrayAttr:$order
     );
 
-    let results = (outs TT_Tensor:$result);
+    let results = (outs TT_TensorOrMemDesc:$result);
 
     let assemblyFormat = "$src attr-dict `:` type($src) `->` type($result)";
 
@@ -541,11 +543,17 @@ def TT_GetProgramIdOp : TT_Op<"get_program_id", [Pure]> {
 }
 
 def TT_GetNumProgramsOp : TT_Op<"get_num_programs", [Pure]> {
-    let arguments = (ins I32Attr:$axis);
+    let arguments = (ins TT_ProgramDim:$axis);
 
     let results = (outs I32:$result);
 
-    let assemblyFormat = "attr-dict `:` type($result)";
+    let assemblyFormat = "$axis attr-dict `:` type($result)";
+
+    let extraClassDeclaration = [{
+      int32_t getAxisAsInt() {
+        return static_cast<int32_t>(getAxis());
+      }
+    }];
 }
 
 //
@@ -562,8 +570,8 @@ def TT_DotOp : TT_Op<"dot", [Pure,
     }];
 
     let arguments = (ins
-      TT_FpIntTensor:$a,
-      TT_FpIntTensor:$b,
+      TT_TensorOrMemDesc:$a,
+      TT_TensorOrMemDesc:$b,
       TT_FpIntTensor:$c,
       BoolAttr:$allowTF32,
       I32Attr:$maxNumImpreciseAcc);

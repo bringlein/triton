@@ -1542,9 +1542,9 @@ module attributes {"triton_gpu.num-warps" = 4 : i32, "triton_gpu.threads-per-war
     %20 = triton_gpu.convert_layout %16 : tensor<32x32x!tt.ptr<f16>, #blocked> -> tensor<32x32x!tt.ptr<f16>, #blocked4>
     %21 = tt.load %20 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : tensor<32x32xf16, #blocked4>
     %22 = triton_gpu.convert_layout %21 : tensor<32x32xf16, #blocked4> -> tensor<32x32xf16, #blocked>
-    %23 = triton_gpu.convert_layout %22 : tensor<32x32xf16, #blocked> -> tensor<32x32xf16, #shared>
-    %24 = tt.trans %23 {order=array<i32: 1,0>} : tensor<32x32xf16, #shared> -> tensor<32x32xf16, #shared1>
-    %25 = triton_gpu.convert_layout %24 : tensor<32x32xf16, #shared1> -> tensor<32x32xf16, #blocked>
+    %23 = triton_gpu.local_alloc %22 : (tensor<32x32xf16, #blocked>) -> !tt.memdesc<32x32xf16, #shared>
+    %24 = tt.trans %23 {order=array<i32: 1,0>} : !tt.memdesc<32x32xf16, #shared> -> !tt.memdesc<32x32xf16, #shared1>
+    %25 = triton_gpu.local_load %24 : !tt.memdesc<32x32xf16, #shared1> -> tensor<32x32xf16, #blocked>
     %26 = triton_gpu.convert_layout %19 : tensor<32x32xf16, #blocked> -> tensor<32x32xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #blocked5}>>
     %27 = triton_gpu.convert_layout %25 : tensor<32x32xf16, #blocked> -> tensor<32x32xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #blocked5}>>
     %28 = triton_gpu.convert_layout %cst : tensor<32x32xf32, #blocked> -> tensor<32x32xf32, #blocked5>
@@ -1973,10 +1973,10 @@ module attributes {"triton_gpu.compute-capability" = 80 : i32, "triton_gpu.num-c
       %67 = tt.load %66 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : tensor<32x64xf16, #blocked>
       %68 = tt.addptr %17, %65 : tensor<256x64x!tt.ptr<f16, 1>, #blocked>, tensor<256x64xi32, #blocked>
       %69 = tt.load %68 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : tensor<256x64xf16, #blocked>
-      %70 = triton_gpu.convert_layout %69 : tensor<256x64xf16, #blocked> -> tensor<256x64xf16, #shared>
-      %71 = tt.trans %70 {order=array<i32: 1,0>} : tensor<256x64xf16, #shared> -> tensor<64x256xf16, #shared1>
+      %70 = triton_gpu.local_alloc %69 : (tensor<256x64xf16, #blocked>) -> !tt.memdesc<256x64xf16, #shared>
+      %71 = tt.trans %70 {order=array<i32: 1,0>} : !tt.memdesc<256x64xf16, #shared> -> !tt.memdesc<64x256xf16, #shared1>
       %72 = triton_gpu.convert_layout %67 : tensor<32x64xf16, #blocked> -> tensor<32x64xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #blocked3}>>
-      %73 = triton_gpu.convert_layout %71 : tensor<64x256xf16, #shared1> -> tensor<64x256xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #blocked3}>>
+      %73 = triton_gpu.local_load %71 : !tt.memdesc<64x256xf16, #shared1> -> tensor<64x256xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #blocked3}>>
       %74 = triton_gpu.convert_layout %arg8 : tensor<32x256xf32, #blocked3> -> tensor<32x256xf32, #mma>
       %75 = triton_gpu.convert_layout %72 : tensor<32x64xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #blocked3}>> -> tensor<32x64xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>>
       %76 = triton_gpu.convert_layout %73 : tensor<64x256xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #blocked3}>> -> tensor<64x256xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #mma, kWidth = 2}>>
@@ -2256,4 +2256,61 @@ tt.func @assertop(%ptr: tensor<1024x!tt.ptr<i1>, #blocked>) {
   tt.assert %1, "cond must be true ", "unknown", "unknown", 0 : tensor<1024xi1, #blocked1>
   tt.return
 }
+}
+
+// -----
+#blocked = #triton_gpu.blocked<{sizePerThread = [1,2], threadsPerWarp = [32,1], warpsPerCTA = [1,1], order = [1,0]}>
+#blocked1 = #triton_gpu.blocked<{sizePerThread = [1,1], threadsPerWarp = [16,2], warpsPerCTA = [1,1], order = [1,0]}>
+#blocked2 = #triton_gpu.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#blocked3 = #triton_gpu.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32, "triton_gpu.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @dot_wait_propagate
+  tt.func public @dot_wait_propagate(%arg0: tensor<16x2xf32, #blocked>) -> tensor<16x2xf32, #blocked> {
+    // CHECK-NOT: triton_gpu.convert_layout
+    %a = triton_gpu.convert_layout %arg0 : tensor<16x2xf32, #blocked> -> tensor<16x2xf32, #blocked1>
+    %b = triton_nvidia_gpu.dot_wait %a {pendings = 0 : i32} : tensor<16x2xf32, #blocked1>
+    %c = triton_gpu.convert_layout %b : tensor<16x2xf32, #blocked1> -> tensor<16x2xf32, #blocked>
+    tt.return %c : tensor<16x2xf32, #blocked>
+  }
+}
+
+// -----
+#blocked = #triton_gpu.blocked<{sizePerThread = [1,2], threadsPerWarp = [32,1], warpsPerCTA = [1,1], order = [1,0]}>
+#blocked1 = #triton_gpu.blocked<{sizePerThread = [2,4], threadsPerWarp = [16,2], warpsPerCTA = [1,1], order = [1,0]}>
+#blocked2 = #triton_gpu.blocked<{sizePerThread = [4,2], threadsPerWarp = [2,16], warpsPerCTA = [1,1], order = [0,1]}>
+
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32, "triton_gpu.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @trans_propagate
+  tt.func public @trans_propagate(%arg0: tensor<16x2xf32, #blocked>) -> tensor<2x16xf32, #blocked2> {
+    // CHECK: tt.trans
+    // CHECK: triton_gpu.convert_layout
+    %a = triton_gpu.convert_layout %arg0 : tensor<16x2xf32, #blocked> -> tensor<16x2xf32, #blocked1>
+    %b = tt.trans %a {order=array<i32: 1,0>} : tensor<16x2xf32, #blocked1> -> tensor<2x16xf32, #blocked2>
+    tt.return %b : tensor<2x16xf32, #blocked2>
+  }
+}
+
+
+// -----
+#blocked = #triton_gpu.blocked<{sizePerThread = [1, 16], threadsPerWarp = [2, 16], warpsPerCTA = [8, 1], order = [1, 0]}>
+#mma = #triton_gpu.nvidia_mma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [8, 1], instrShape = [16, 128, 32]}>
+#mma1 = #triton_gpu.nvidia_mma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [8, 1], instrShape = [16, 256, 32]}>
+
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 8 : i32, "triton_gpu.threads-per-warp" = 32 : i32} {
+  // Verify that we don't hoist the convert on top of the broadcast. In general we should hoist the convert to reduce its cost
+  // but because this would combine the 1st and 2nd convert and since the 1st convert is known to be a no-op this would
+  // generate more expensive code.
+  // CHECK-LABEL: @hoist_with_free_convert
+  tt.func public @hoist_with_free_convert(%arg0: tensor<128x256xf32, #mma1>, %arg1: tensor<128x1xf32, #mma>) -> tensor<128x256xf32, #blocked> {
+    // CHECK: triton_gpu.convert_layout
+    // CHECK: tt.broadcast
+    // CHECK: triton_gpu.convert_layout
+    // CHECK: tt.return
+    %0 = triton_gpu.convert_layout %arg0 : tensor<128x256xf32, #mma1> -> tensor<128x256xf32, #mma>
+    %1 = tt.broadcast %arg1 : tensor<128x1xf32, #mma> -> tensor<128x256xf32, #mma>
+    %2 = arith.addf %0, %1 : tensor<128x256xf32, #mma>
+    %3 = triton_gpu.convert_layout %2 : tensor<128x256xf32, #mma> -> tensor<128x256xf32, #blocked>
+    tt.return %3 : tensor<128x256xf32, #blocked>
+  }
 }

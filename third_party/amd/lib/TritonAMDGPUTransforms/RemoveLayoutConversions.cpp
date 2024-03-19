@@ -191,10 +191,11 @@ static bool hasConvertToMMATransisitiveUse(Operation *op, Attribute encoding) {
 }
 
 #ifdef USE_ROCM
-// Look ahead to at the transitive uses and see if there is a convert to mfma
-// operations.
+// Look ahead to at the transitive uses and see if there is a convert to mfma or
+// wmma operations.
 // TODO: unify with hasConvertToMMATransisitiveUse?
-static bool hasConvertToMFMATransisitiveUse(Operation *op, Attribute encoding) {
+static bool hasConvertToAmdMmaTransisitiveUse(Operation *op,
+                                              Attribute encoding) {
   SmallVector<Value> queue = {op->getResult(0)};
   SetVector<Operation *> forwardSlice;
   llvm::SmallDenseSet<Value> seen;
@@ -261,8 +262,12 @@ void LayoutPropagation::initAnchorLayout() {
           //
           // TODO: rework this heuristic if we can store MFMA layout directly
           // into global memory.
-          if (tensorType.getEncoding().isa<triton::gpu::MfmaEncodingAttr>() &&
-              !hasConvertToMFMATransisitiveUse(op, tensorType.getEncoding()))
+          //
+          // Also relevant for WMMA layout.
+          if (tensorType.getEncoding()
+                  .isa<triton::gpu::AMDMfmaEncodingAttr,
+                       triton::gpu::AMDWmmaEncodingAttr>() &&
+              !hasConvertToAmdMmaTransisitiveUse(op, tensorType.getEncoding()))
             continue;
 #endif
           layouts.insert({result, LayoutInfo(tensorType.getEncoding())});
@@ -280,7 +285,14 @@ void LayoutPropagation::setEncoding(ValueRange values, LayoutInfo &info,
       continue;
     bool hasChanged = false;
     for (auto encoding : info.encodings) {
-      auto dstEncoding = inferDstEncoding(op, encoding);
+      std::optional<Attribute> dstEncoding;
+      if (isa<ConvertLayoutOp>(op)) {
+        // Try to remove the convert by making the dst encoding match the source
+        // encoding.
+        dstEncoding = encoding;
+      } else {
+        dstEncoding = inferDstEncoding(op, encoding);
+      }
       if (dstEncoding)
         hasChanged |= layouts[value].encodings.insert(*dstEncoding);
     }
@@ -332,13 +344,6 @@ SmallVector<Value> LayoutPropagation::propagateToUsers(Value value,
       setEncoding({afterArg, result}, info, changed, user);
       continue;
     }
-#ifdef USE_ROCM
-      if (auto convertOp = dyn_cast<triton::gpu::ConvertLayoutOp>(user)) {
-        if (triton::gpu::hasSharedEncoding(convertOp.getResult()) ||
-            triton::gpu::hasSharedEncoding(convertOp.getSrc()))
-          continue;
-      }
-#endif
       if (user->hasTrait<mlir::OpTrait::SameOperandsAndResultEncoding>() ||
           user->hasTrait<mlir::OpTrait::Elementwise>() ||
           isa<triton::ReduceOp, triton::ExpandDimsOp,
@@ -750,8 +755,7 @@ Operation *LayoutPropagation::rewriteOp(Operation *op) {
 static bool canBeRemat(Operation *op) {
   if (isa<triton::LoadOp, triton::StoreOp>(op))
     return !isExpensiveLoadOrStore(op);
-  if (isa<tensor::ExtractSliceOp, triton::gpu::AllocTensorOp,
-          triton::gpu::InsertSliceAsyncOp, triton::AtomicRMWOp,
+  if (isa<triton::AtomicRMWOp,
           triton::AtomicCASOp, triton::DotOp>(op))
     return false;
   if (isa<scf::IfOp, scf::WhileOp, scf::ConditionOp>(op))
@@ -871,10 +875,6 @@ static LogicalResult getRematerializableSlice(
 }
 
 static void backwardRematerialization(ConvertLayoutOp convertOp) {
-  // we don't want to rematerialize any conversion to/from shared
-  if (triton::gpu::hasSharedEncoding(convertOp.getResult()) ||
-      triton::gpu::hasSharedEncoding(convertOp.getSrc()))
-    return;
   // we don't handle conversions to DotOperandEncodingAttr
   // this is a heuristics to accommodate fused attention
   auto targetType = convertOp->getResultTypes()[0].cast<RankedTensorType>();
@@ -897,10 +897,6 @@ static void backwardRematerialization(ConvertLayoutOp convertOp) {
 // For convert left we try to hoist them above type extension to reduce the cost
 // of the convert.
 static void hoistConvertOnTopOfExtOrBroadcast(ConvertLayoutOp convertOp) {
-  // we don't want to rematerialize any conversion to/from shared
-  if (triton::gpu::hasSharedEncoding(convertOp.getResult()) ||
-      triton::gpu::hasSharedEncoding(convertOp.getSrc()))
-    return;
   // we don't handle conversions to DotOperandEncodingAttr
   // this is a heuristics to accommodate fused attention
   auto targetType = convertOp->getResultTypes()[0].cast<RankedTensorType>();

@@ -7,8 +7,8 @@ def TritonAMDGPUPipeline : Pass<"tritonamdgpu-pipeline", "mlir::ModuleOp"> {
   let summary = "pipeline";
 
   let description = [{
-    Replace `LoadOp` in loops by `InsertSliceAsyncOp` instructions that asynchronously construct the data
-    needed at the next iteration
+    Applies software pipelining to loops in the module based on number of stages.
+    This may convert some load into asynchronous loads, and multi-buffer the data.
   }];
 
   let constructor = "mlir::createTritonAMDGPUPipelinePass()";
@@ -70,9 +70,9 @@ def TritonAMDGPUAccelerateMatmul : Pass<"tritonamdgpu-accelerate-matmul", "mlir:
   let dependentDialects = [];
 
   let options = [
-    Option<"matrixCoreVersion", "matrix-core-version",
-           "int32_t", /*default*/"0",
-           "device matrix core version">,
+    Option<"archGenerationName", "arch-generation-name",
+           "std::string", /*default=*/"std::string{}",
+           "GFX generation name of target device.">,
     Option<"matrixInstructionSize", "matrix-instruction-size",
            "int32_t", /*default*/"0",
            "enforce matrix instruction MN size">

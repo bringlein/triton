@@ -37,7 +37,7 @@ class AttrsDescriptor:
 
     def hash(self):
         key = str([sorted(x) for x in self.__dict__.values()])
-        return hashlib.md5(key.encode("utf-8")).hexdigest()
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 # - ^\s*tt\.func\s+ : match the start of the string, any leading whitespace, the keyword func,
@@ -101,8 +101,10 @@ class ASTSource:
             self.attrs = AttrsDescriptor()
 
     def hash(self):
-        key = f"{self.fn.cache_key}-{self.attrs.hash()}-{self.signature.values()}-{self.constants}"
-        return hashlib.md5(key.encode("utf-8")).hexdigest()
+        sorted_sig = [v for k, v in sorted(self.signature.items())]
+        sorted_constants = [(k, v) for k, v in sorted(self.constants.items())]
+        key = f"{self.fn.cache_key}-{self.attrs.hash()}-{sorted_sig}-{sorted_constants}"
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def make_ir(self, options, context):
         return ast_to_ttir(self.fn, self, context=context, options=options)
@@ -125,7 +127,7 @@ class IRSource:
         self.signature = {k: convert_type_repr(ty) for k, ty in enumerate(types)}
 
     def hash(self):
-        return hashlib.md5(self.src.encode("utf-8")).hexdigest()
+        return hashlib.sha256(self.src.encode("utf-8")).hexdigest()
 
     def make_ir(self, options, context):
         module = ir.parse_mlir_module(self.path, context)
@@ -145,15 +147,15 @@ def triton_key():
     contents = []
     # frontend
     with open(__file__, "rb") as f:
-        contents += [hashlib.sha1(f.read()).hexdigest()]
+        contents += [hashlib.sha256(f.read()).hexdigest()]
     # compiler
     compiler_path = os.path.join(TRITON_PATH, 'compiler')
     backends_path = os.path.join(TRITON_PATH, 'compiler', 'backends')
     for lib in pkgutil.iter_modules([compiler_path, backends_path]):
         with open(lib.module_finder.find_spec(lib.name).origin, "rb") as f:
-            contents += [hashlib.sha1(f.read()).hexdigest()]
+            contents += [hashlib.sha256(f.read()).hexdigest()]
     # backend
-    libtriton_hash = hashlib.sha1()
+    libtriton_hash = hashlib.sha256()
     with open(os.path.join(TRITON_PATH, "_C/libtriton.so"), "rb") as f:
         while True:
             chunk = f.read(1024**2)
@@ -165,7 +167,7 @@ def triton_key():
     language_path = os.path.join(TRITON_PATH, 'language')
     for lib in pkgutil.iter_modules([language_path]):
         with open(lib.module_finder.find_spec(lib.name).origin, "rb") as f:
-            contents += [hashlib.sha1(f.read()).hexdigest()]
+            contents += [hashlib.sha256(f.read()).hexdigest()]
     return f'{__version__}' + '-'.join(contents)
 
 
@@ -227,7 +229,7 @@ def compile(src, target=None, options=None):
     options = backend.parse_options(dict(options or dict(), **extra_options))
     # create cache manager
     key = f"{triton_key()}-{src.hash()}-{backend.hash()}-{options.hash()}-{str(sorted(get_env_vars().items()))}"
-    hash = hashlib.md5(key.encode("utf-8")).hexdigest()
+    hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
     fn_cache_manager = get_cache_manager(hash)
     # For dumping/overriding only hash the source as we want it to be independent of triton
     # core changes to make it easier to track kernels by hash.
@@ -304,18 +306,18 @@ class CompiledKernel:
         self.metadata = json.loads(metadata_path.read_text())
         KernelMetadata = namedtuple('KernelMetadata', sorted(list(self.metadata.keys())))
         self.metadata = KernelMetadata(**self.metadata)
+        self.src = src
         self.hash = hash
 
         self.name = self.metadata.name
-        # create launcher
-        self.run = driver.active.launcher_cls(src, self.metadata)
         # stores the text of each level of IR that was generated during compilation
         asm_files = [Path(p) for c, p in metadata_group.items() if not c.endswith(".json")]
+        binary_ext = make_backend(self.metadata.target).binary_ext
         self.asm = {
-            file.suffix[1:]: file.read_bytes() if file.suffix[1:] == driver.active.binary_ext else file.read_text()
+            file.suffix[1:]: file.read_bytes() if file.suffix[1:] == binary_ext else file.read_text()
             for file in asm_files
         }
-        self.kernel = self.asm[driver.active.binary_ext]
+        self.kernel = self.asm[binary_ext]
         # binaries are lazily initialized
         # because it involves doing runtime things
         # (e.g., checking amount of shared memory on current device)
@@ -326,6 +328,8 @@ class CompiledKernel:
         if self.module is not None:
             return
         device = driver.active.get_current_device()
+        # create launcher
+        self.run = driver.active.launcher_cls(self.src, self.metadata)
         # not enough shared memory to run the kernel
         max_shared = driver.active.utils.get_device_properties(device)["max_shared_mem"]
         if self.metadata.shared > max_shared:

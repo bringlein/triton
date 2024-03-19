@@ -6,22 +6,18 @@ add_triton_library(TritonNVIDIAGPUToLLVM
     DotOpToLLVM/MMAv2.cpp
     DotOpToLLVM/WGMMA.cpp
     DotOpToLLVM.cpp
-    HistogramOpToLLVM.cpp
     ElementwiseOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
     BarrierOpToLLVM.cpp
     TritonGPUToLLVM.cpp
     DecomposeUnsupportedConversions.cpp
-    PrintOpToLLVM.cpp
-    ControlFlowOpToLLVM.cpp
     SPMDOpToLLVM.cpp
-    ReduceOpToLLVM.cpp
-    ScanOpToLLVM.cpp
     TensorPtrOpsToLLVM.cpp
     ClusterOpsToLLVM.cpp
-    AllocateSharedMemory.cpp
     PTXAsmFormat.cpp
     Utility.cpp
+    TargetInfo.cpp
+    PrintOpToLLVM.cpp
 
     DEPENDS
     TritonNVIDIAGPUConversionPassIncGen
